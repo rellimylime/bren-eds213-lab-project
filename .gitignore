@@ -47,3 +47,12 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# DuckDB transient files
+*.duckdb.wal
+*.duckdb.tmp
+
+# Large data files (exceed GitHub 100 MB limit)
+*.gpkg
+*.duckdb
+data/raw/climate/terraclimate/damage_areas_summaries/*.parquet
