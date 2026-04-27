@@ -1,80 +1,110 @@
-# Bark Beetle Disturbance & Climate Database
+# Bark Beetle Disturbance and Climate Database
 
-**EDS 213 — Databases and Data Management | Lab Project**  
+**EDS 213: Databases and Data Management**  
 **Author:** Emily Miller  
-**Institution:** UCSB Bren School of Environmental Science & Management  
-
----
+**Institution:** UCSB Bren School of Environmental Science & Management
 
 ## Overview
 
-This project builds a relational database linking USDA Forest Service aerial insect and disease survey observations to climate data, then uses it to ask: **does prior-year drought stress predict bark beetle damage intensity the following year, and does this vary by USFS region?**
-
-The database is built from compiled datasets maintained in a separate data pipeline repository: [`rellimylime/forest-data-compilation`](https://github.com/rellimylime/forest-data-compilation). That repo handles all raw data downloads, cleaning, and climate extraction. This repo takes those outputs as inputs and focuses on the database design, ingestion, SQL analysis, and visualization.
-
----
+This project builds a relational DuckDB database linking USDA Forest Service aerial insect and disease survey observations to TerraClimate summaries. The goal is to test whether prior-year drought stress helps explain bark beetle damage intensity in the following survey year, and whether that relationship varies by USFS region.
 
 ## Analytical Question
 
-> Does prior-year Palmer Drought Severity Index (PDSI) predict bark beetle damage intensity (acres affected) the following year? Does this relationship vary across USFS regions?
+Does prior-year Palmer Drought Severity Index (PDSI) predict bark beetle damage intensity (acres affected) the following year, and does that relationship vary across USFS regions?
 
-**Scope:**
-- Post-2015 IDS observations only (avoids methodology break between legacy and DMSM intensity measures)
-- Bark beetle damage agents only
-- CONUS regions (1–6, 8–9)
-
----
-
-## Database Schema
-
-Four tables:
-
-| Table | Description | Source |
-|---|---|---|
-| `observations` | IDS damage polygon records | `ids_terraclimate_merged.csv` |
-| `climate` | TerraClimate variables at IDS observation locations | `ids_terraclimate_merged.csv` |
-| `agents` | Lookup: damage agent codes and names | `dca_code_lookup.csv` |
-| `regions` | Lookup: USFS region codes and names | `region_lookup.csv` |
-
-See [`schema.md`](schema.md) for full table definitions, data types, and key design decisions.
-
----
+Project scope:
+- Bark beetle agents only (`DCA_CODE` 11000 to 11999)
+- Post-2015 IDS observations only
+- CONUS USFS regions only (`1-6, 8-9`)
 
 ## Repository Structure
 
-```
+```text
 bren-eds213-lab-project/
-├── README.md               # This file
-├── schema.md               # Week 1: table definitions, keys, design decisions
-├── data/
-│   └── README.md           # Notes on obtaining source data
-├── scripts/
-│   ├── 01_clean.R          # Week 2: filter, scale, and prep CSVs for ingestion
-│   ├── 02_load.sql         # Week 3: DDL and COPY statements
-│   ├── 03_queries.sql      # Weeks 4–5: analytical SQL queries
-│   └── 04_visualize.R      # Week 5: ggplot2 figures
-└── output/
-    └── figures/            # Exported visualizations
+|-- README.md
+|-- schema.md
+|-- data/
+|   |-- README.md
+|   |-- raw/
+|   |   |-- ids/
+|   |   |-- lookups/
+|   |   `-- climate/
+|   `-- processed/
+|       |-- clean/
+|       `-- duckdb/
+|-- scripts/
+|   |-- 01_clean.R
+|   |-- clean_helpers.R
+|   |-- clean_observations.R
+|   |-- clean_climate.R
+|   |-- clean_agents.R
+|   |-- clean_regions.R
+|   |-- write_clean_metadata.R
+|   |-- 03_queries.sql
+|   |-- 04_visualize.R
+|   `-- 02_load.sql
+`-- output/
+    `-- figures/
 ```
-
----
 
 ## Source Data
 
-Source data is not tracked in this repository. It is produced by the pipeline in [`rellimylime/forest-data-compilation`](https://github.com/rellimylime/forest-data-compilation) and should be placed in `data/` before running any scripts.
+This repo now treats `data/` as the canonical home for both input files and derived outputs. Raw upstream files go under `data/raw/`, and anything created by this repo goes under `data/processed/`.
 
-| File | Source location in pipeline repo |
-|---|---|
-| `ids_terraclimate_merged.csv` | `merged_data/ids_terraclimate_merged.csv` |
-| `dca_code_lookup.csv` | `01_ids/lookups/dca_code_lookup.csv` |
-| `region_lookup.csv` | `01_ids/lookups/region_lookup.csv` |
+Key inputs:
+- `data/raw/ids/ids_layers_cleaned.gpkg` (layer `damage_areas`)
+- `data/raw/lookups/dca_code_lookup.csv`
+- `data/raw/lookups/region_lookup.csv`
+- `data/raw/climate/terraclimate/damage_areas_summaries/{pdsi,vpd,def,tmmx,soil}.parquet`
 
----
+## Workflow
 
-## Tools
+1. Put the upstream source files into the repo under `data/raw/`.
+2. Run `scripts/01_clean.R` to build the four clean CSVs and metadata in `data/processed/clean/`.
+3. Review `data/processed/clean/metadata.md`, which is generated automatically by the cleaning script.
+4. Load the clean tables into DuckDB with `scripts/02_load.sql`.
 
-- **Database:** DuckDB
-- **Cleaning & visualization:** R (`dplyr`, `ggplot2`, `duckdb`)
-- **SQL:** Standard SQL via DuckDB CLI and R `duckdb` package
+Supporting raw-data notes live in:
+- `data/raw/PROVENANCE.md`
+- `data/raw/KNOWN_ISSUES.md`
 
----
+Example commands:
+
+```bash
+Rscript scripts/01_clean.R
+```
+
+`scripts/01_clean.R` is a short wrapper that runs these smaller scripts in order:
+- `scripts/clean_observations.R`
+- `scripts/clean_climate.R`
+- `scripts/clean_agents.R`
+- `scripts/clean_regions.R`
+- `scripts/write_clean_metadata.R`
+
+Then load the database from R:
+
+```r
+library(duckdb)
+library(DBI)
+
+con <- dbConnect(duckdb(), dbdir = "data/processed/duckdb/bark_beetle.duckdb")
+sql <- readLines("scripts/02_load.sql")
+dbExecute(con, paste(sql, collapse = "\n"))
+dbDisconnect(con, shutdown = TRUE)
+```
+
+Or from the command line:
+
+```bash
+duckdb data/processed/duckdb/bark_beetle.duckdb < scripts/02_load.sql
+```
+
+## Schema
+
+The database contains four tables:
+- `regions`
+- `agents`
+- `observations`
+- `climate`
+
+See [schema.md](schema.md) for the full table definitions and design notes.
