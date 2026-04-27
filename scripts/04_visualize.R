@@ -17,6 +17,8 @@ suppressPackageStartupMessages({
   library(duckdb)
   library(readr)
   library(dplyr)
+  library(tidyr)
+  library(broom)
   library(ggplot2)
 })
 
@@ -160,11 +162,71 @@ analysis_region_relationships <- dbGetQuery(
 ) |>
   as_tibble()
 
+# === Panel regression: region FE on region-year data ===
+# Pools temporal variation across regions while controlling for each region's
+# baseline damage level — closer to the actual question than pooled OLS.
+panel_model <- lm(mean_log_acres ~ mean_pdsi + region_abbrev, data = analysis_region_year)
+
+message("\nPanel model (region FE, region-year level):")
+print(summary(panel_model))
+
+panel_coef <- tidy(panel_model, conf.int = TRUE) |>
+  filter(term == "mean_pdsi") |>
+  mutate(region_abbrev = "Panel (FE)", source = "Panel model (region FE)")
+
+# Per-region OLS on region-year summaries: within-region temporal signal only
+region_year_fits <- analysis_region_year |>
+  group_by(region_abbrev) |>
+  group_modify(~ tidy(lm(mean_log_acres ~ mean_pdsi, data = .x), conf.int = TRUE)) |>
+  ungroup() |>
+  filter(term == "mean_pdsi") |>
+  mutate(source = "Per-region OLS (region-year)")
+
+region_year_r2 <- analysis_region_year |>
+  group_by(region_abbrev) |>
+  group_modify(~ glance(lm(mean_log_acres ~ mean_pdsi, data = .x))) |>
+  ungroup() |>
+  select(region_abbrev, r.squared, p.value)
+
+message("\nPer-region R² and p-value (region-year OLS):")
+print(region_year_r2)
+
+# Pancake sensitivity: per-region slopes on non-pancake observations only
+nonpancake_slopes <- analysis_observations |>
+  filter(!is_pancake) |>
+  group_by(region_abbrev) |>
+  group_modify(~ tidy(lm(log_acres ~ pdsi, data = .x), conf.int = TRUE)) |>
+  ungroup() |>
+  filter(term == "pdsi") |>
+  select(region_abbrev, slope_nonpancake = estimate)
+
+region_order <- analysis_region_relationships |>
+  arrange(slope_log_acres_on_pdsi) |>
+  pull(region_abbrev)
+
+slope_comparison <- analysis_region_relationships |>
+  select(region_abbrev, slope_all = slope_log_acres_on_pdsi) |>
+  left_join(nonpancake_slopes, by = "region_abbrev") |>
+  pivot_longer(
+    cols = c(slope_all, slope_nonpancake),
+    names_to = "dataset",
+    values_to = "slope"
+  ) |>
+  mutate(
+    dataset = ifelse(dataset == "slope_all", "All observations", "Non-pancake only"),
+    region_abbrev = factor(region_abbrev, levels = region_order)
+  )
+
+# === Figures ===
+
+set.seed(213)
+
 plot_sample <- analysis_observations |>
   group_by(region_abbrev) |>
   group_modify(~ slice_sample(.x, n = min(nrow(.x), 5000))) |>
   ungroup()
 
+# 1. Scatter: observation level, all observations
 scatter_plot <- ggplot(plot_sample, aes(x = pdsi, y = log_acres)) +
   geom_point(alpha = 0.12, size = 0.7, color = "#2B6CB0") +
   geom_smooth(method = "lm", se = FALSE, color = "#C05621", linewidth = 0.8) +
@@ -177,10 +239,9 @@ scatter_plot <- ggplot(plot_sample, aes(x = pdsi, y = log_acres)) +
   ) +
   theme_minimal(base_size = 12)
 
+# 2. Slope bars: per-region OLS slopes, all observations
 slope_plot <- analysis_region_relationships |>
-  mutate(
-    region_abbrev = reorder(region_abbrev, slope_log_acres_on_pdsi)
-  ) |>
+  mutate(region_abbrev = reorder(region_abbrev, slope_log_acres_on_pdsi)) |>
   ggplot(aes(x = region_abbrev, y = slope_log_acres_on_pdsi)) +
   geom_col(fill = "#2B6CB0") +
   geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
@@ -193,47 +254,108 @@ slope_plot <- analysis_region_relationships |>
   ) +
   theme_minimal(base_size = 12)
 
-summary_plot <- ggplot(
+# 3. Region-year scatter: within-region temporal trend with CI
+region_year_scatter <- ggplot(
   analysis_region_year,
-  aes(x = mean_pdsi, y = mean_log_acres, group = region_abbrev)
+  aes(x = mean_pdsi, y = mean_log_acres)
 ) +
-  geom_path(color = "grey65") +
-  geom_point(size = 2.2, color = "#2B6CB0") +
+  geom_smooth(
+    method = "lm", se = TRUE,
+    color = "#C05621", fill = "#C05621", alpha = 0.15, linewidth = 0.8
+  ) +
+  geom_point(size = 2.5, color = "#2B6CB0") +
+  geom_text(aes(label = survey_year), size = 2.5, vjust = -0.7, color = "grey30") +
   facet_wrap(~region_abbrev) +
   labs(
-    title = "Region-Year Mean PDSI and Mean Damage",
-    subtitle = "Each point is one region-year summary",
+    title = "Prior-Year PDSI vs Bark Beetle Damage (Region-Year Level)",
+    subtitle = "Each point is one region-year; OLS fit with 95% CI shows within-region temporal trend",
     x = "Mean prior water-year PDSI",
     y = "Mean log(acres + 1)"
   ) +
   theme_minimal(base_size = 12)
 
+# 4. Coefficient plot: panel model vs per-region fits on region-year data
+coef_plot_data <- bind_rows(region_year_fits, panel_coef) |>
+  mutate(region_abbrev = reorder(region_abbrev, estimate))
+
+panel_coef_plot <- ggplot(
+  coef_plot_data,
+  aes(x = estimate, y = region_abbrev, color = source)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.3) +
+  geom_point(size = 3) +
+  scale_color_manual(
+    values = c(
+      "Per-region OLS (region-year)" = "#2B6CB0",
+      "Panel model (region FE)" = "#C05621"
+    ),
+    name = NULL
+  ) +
+  labs(
+    title = "PDSI Slope Estimates with 95% Confidence Intervals",
+    subtitle = "Region-year level; negative = more damage in drier prior years",
+    x = "Slope of mean log(acres + 1) on mean prior-year PDSI",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+# 5. Pancake sensitivity: all observations vs non-pancake only
+slope_comparison_plot <- ggplot(
+  slope_comparison,
+  aes(x = slope, y = region_abbrev, fill = dataset)
+) +
+  geom_col(position = "dodge") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  scale_fill_manual(
+    values = c("All observations" = "#2B6CB0", "Non-pancake only" = "#C05621"),
+    name = NULL
+  ) +
+  labs(
+    title = "Pancake Sensitivity: All Observations vs Non-Pancake Only",
+    subtitle = "Large differences indicate pancake features are driving the slope in that region",
+    x = "Slope of log(acres + 1) on prior-year PDSI",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+# === Save figures ===
+
 ggsave(
   filename = file.path(fig_dir, "pdsi_vs_log_acres_by_region.png"),
   plot = scatter_plot,
-  width = 11,
-  height = 8,
-  dpi = 300
+  width = 11, height = 8, dpi = 300
 )
 
 ggsave(
   filename = file.path(fig_dir, "regional_pdsi_slope.png"),
   plot = slope_plot,
-  width = 8,
-  height = 5,
-  dpi = 300
+  width = 8, height = 5, dpi = 300
 )
 
 ggsave(
-  filename = file.path(fig_dir, "region_year_pdsi_damage_summary.png"),
-  plot = summary_plot,
-  width = 11,
-  height = 8,
-  dpi = 300
+  filename = file.path(fig_dir, "region_year_pdsi_scatter.png"),
+  plot = region_year_scatter,
+  width = 11, height = 8, dpi = 300
+)
+
+ggsave(
+  filename = file.path(fig_dir, "panel_model_coef.png"),
+  plot = panel_coef_plot,
+  width = 9, height = 6, dpi = 300
+)
+
+ggsave(
+  filename = file.path(fig_dir, "regional_slope_pancake_comparison.png"),
+  plot = slope_comparison_plot,
+  width = 8, height = 5, dpi = 300
 )
 
 message("Wrote figures to: ", fig_dir)
 message("  - pdsi_vs_log_acres_by_region.png")
 message("  - regional_pdsi_slope.png")
-message("  - region_year_pdsi_damage_summary.png")
-
+message("  - region_year_pdsi_scatter.png  [new: within-region temporal trend]")
+message("  - panel_model_coef.png          [new: panel regression + per-region CIs]")
+message("  - regional_slope_pancake_comparison.png  [new: pancake sensitivity]")

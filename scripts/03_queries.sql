@@ -72,7 +72,8 @@ SELECT
     CORR(pdsi, acres) AS corr_pdsi_acres,
     CORR(pdsi, log_acres) AS corr_pdsi_log_acres,
     REGR_SLOPE(log_acres, pdsi) AS slope_log_acres_on_pdsi,
-    REGR_INTERCEPT(log_acres, pdsi) AS intercept_log_acres_on_pdsi
+    REGR_INTERCEPT(log_acres, pdsi) AS intercept_log_acres_on_pdsi,
+    REGR_R2(log_acres, pdsi) AS r2_log_acres_on_pdsi
 FROM analysis_observations
 GROUP BY
     region_id,
@@ -110,7 +111,8 @@ SELECT
     median_acres,
     corr_pdsi_acres,
     corr_pdsi_log_acres,
-    slope_log_acres_on_pdsi
+    slope_log_acres_on_pdsi,
+    r2_log_acres_on_pdsi
 FROM analysis_region_relationships
 ORDER BY region_abbrev;
 
